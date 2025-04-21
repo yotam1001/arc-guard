@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Angle-Distance Chart</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        margin: 0;
+        background-color: #f8f9fa;
+      }
+      #chartContainer {
+        width: 80%;
+        max-width: 800px;
+      }
+      canvas {
+        width: 100% !important;
+        height: 400px !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="chartContainer">
+      <canvas id="chartCanvas"></canvas>
+    </div>
+
+    <script>
+      // Sanity check to make sure JS is running
+      console.log("🧪 JS is running!");
+
+      const socket = new WebSocket("ws://192.168.1.45:8080");
+
+      // Timeout warning if WebSocket connection isn't established in time
+      setTimeout(() => {
+        if (socket.readyState !== WebSocket.OPEN) {
+          console.warn("⏳ Still waiting for WebSocket connection...");
+        }
+      }, 3000);
+
+      socket.onopen = () => {
+        console.log("✅ Connected to ESP32 WebSocket!");
+        socket.send("hello from browser");
+      };
+
+      socket.onmessage = (event) => {
+        console.log("📩 Raw message from ESP32:", event.data);
+
+        try {
+          const data = JSON.parse(event.data);
+          console.log("✅ Parsed JSON:", data);
+
+          if (data.angle !== undefined && data.distance !== undefined) {
+            const angle = parseInt(data.angle);
+            const distance = parseFloat(data.distance);
+
+            console.log(
+              `📈 Updating graph → Angle: ${angle}, Distance: ${distance}`
+            );
+            console.log(
+              `🧪 Types → angle: ${typeof angle}, distance: ${typeof distance}`
+            );
+
+            updateGraph(angle, distance);
+          } else {
+            console.warn("⚠️ JSON missing angle or distance:", data);
+          }
+        } catch (error) {
+          console.error("🚨 JSON Parse Error:", error);
+        }
+      };
+
+      socket.onerror = (error) => {
+        console.error("🚨 WebSocket Error:", error);
+      };
+
+      socket.onclose = () => {
+        console.warn("🔴 WebSocket Disconnected");
+      };
+
+      // Chart.js setup
+      const ctx = document.getElementById("chartCanvas").getContext("2d");
+      const chartData = {
+        labels: [],
+        datasets: [
+          {
+            label: "Distance (cm)",
+            borderColor: "#17a2b8",
+            backgroundColor: "rgba(23, 162, 184, 0.2)",
+            data: [],
+            fill: true,
+          },
+        ],
+      };
+
+      const chartOptions = {
+        scales: {
+          x: { title: { display: true, text: "Angle (degrees)" } },
+          y: {
+            title: { display: true, text: "Distance (cm)" },
+            min: 0,
+            max: 200,
+          },
+        },
+      };
+
+      const chart = new Chart(ctx, {
+        type: "line",
+        data: chartData,
+        options: chartOptions,
+      });
+
+      function updateGraph(angle, distance) {
+        console.log("🧩 Current Labels:", chartData.labels);
+
+        const index = chartData.labels.indexOf(angle);
+
+        if (index === -1) {
+          console.log(`➕ Adding new angle: ${angle}`);
+          chartData.labels.push(angle);
+          chartData.datasets[0].data.push(distance);
+        } else {
+          console.log(`🔁 Updating existing angle at index ${index}`);
+          chartData.datasets[0].data[index] = distance;
+        }
+
+        chart.update();
+      }
+    </script>
+  </body>
+</html>
