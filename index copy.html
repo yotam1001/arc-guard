@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>ESP32 Ultrasonic Radar – Range‑Clip & Two‑Echo</title>
+    <title>ESP32 Ultrasonic Radar – Fast Edition (Bug‑fix)</title>
     <style>
       :root {
         --bg: #0a0a0a;
@@ -21,8 +21,6 @@
       }
       #radar {
         display: block;
-        background: transparent;
-        touch-action: none;
       }
       #overlay {
         position: fixed;
@@ -62,186 +60,181 @@
       /> cm
     </div>
     <script>
-      /* === CONFIG ================================================================ */
+      /* === CONSTANTS & CACHED VALUES ============================================= */
       const DEFAULT_ESP_IP = "192.168.1.45";
       const WS_PORT = 8080;
       const RING_COUNT = 4;
       const CONE_HALF_DEG = 2;
       const RECONNECT_MS = 2000;
-      const MAX_ECHO_PER_ANGLE = 2; // keep only current + previous
+      const MAX_ECHO_PER_ANGLE = 2;
 
-      /* === DOM ================================================================ */
-      const cvs = document.getElementById("radar");
-      const ctx = cvs.getContext("2d");
-      const stTxt = document.getElementById("status");
-      const angTxt = document.getElementById("angle");
-      const distTxt = document.getElementById("distance");
-      const clipToggle = document.getElementById("clipToggle");
-      const clipLimitInput = document.getElementById("clipLimit");
-
-      /* === cached colours === */
       const DOT_RGB = getComputedStyle(
         document.documentElement
       ).getPropertyValue("--dot-rgb");
       const CONE_RGB = getComputedStyle(
         document.documentElement
       ).getPropertyValue("--cone-rgb");
-      const RING_COLOR = getComputedStyle(
+      const RING_COL = getComputedStyle(
         document.documentElement
       ).getPropertyValue("--ring");
+      const LEVEL_ALPHA = [1, 0.55];
 
-      /* === geometry === */
-      let ORIGIN_X,
-        ORIGIN_Y,
-        PX_PER_CM = 1;
-      function resizeCanvas() {
-        const W = innerWidth;
-        const H = Math.min(innerHeight, W / 2);
-        cvs.width = W;
-        cvs.height = H;
-        ORIGIN_X = W / 2;
-        ORIGIN_Y = H;
+      /* === DOM ELEMENTS ========================================================== */
+      const cvs = document.getElementById("radar");
+      const ctx = cvs.getContext("2d");
+      const st = document.getElementById("status");
+      const angTxt = document.getElementById("angle");
+      const distTxt = document.getElementById("distance");
+      const clipTgl = document.getElementById("clipToggle");
+      const clipInp = document.getElementById("clipLimit");
+
+      /* === PRECOMPUTED TRIG TABLES ============================================== */
+      const COS = new Float32Array(181),
+        SIN = new Float32Array(181);
+      for (let a = 0; a <= 180; a++) {
+        const r = (a * Math.PI) / 180;
+        COS[a] = Math.cos(r);
+        SIN[a] = Math.sin(r);
       }
-      addEventListener("resize", resizeCanvas);
-      resizeCanvas();
 
-      /* === data === */
-      const echoes = new Map();
-      let currentAngle = 0;
-      let furthestCm = 1;
+      /* === CANVAS GEOMETRY & RINGS ============================================== */
+      let W,
+        H,
+        OX,
+        OY,
+        PX_PER_CM = 1;
+      let furthest = 1; // <- moved above computeScale to avoid TDZ
+      let RINGS_PATH = new Path2D();
 
       function computeScale() {
-        PX_PER_CM = cvs.height / furthestCm;
+        PX_PER_CM = H / furthest;
       }
 
-      /* === helpers === */
+      function buildRings() {
+        RINGS_PATH = new Path2D();
+        for (let i = 1; i <= RING_COUNT; i++) {
+          const r = (H * i) / RING_COUNT;
+          RINGS_PATH.arc(OX, OY, r, Math.PI, 2 * Math.PI);
+        }
+      }
+
+      function resize() {
+        W = innerWidth;
+        H = Math.min(innerHeight, W / 2);
+        cvs.width = W;
+        cvs.height = H;
+        OX = W / 2;
+        OY = H;
+        buildRings();
+        computeScale();
+      }
+      addEventListener("resize", resize);
+      resize();
+
+      /* === DATA ================================================================== */
+      const echoes = Array.from({ length: 181 }, () => [null, null]);
+      let currAngle = 0;
+
       function clipEnabled() {
-        return clipToggle.checked;
+        return clipTgl.checked;
       }
       function clipLimit() {
-        return Number(clipLimitInput.value) || 0;
+        return Number(clipInp.value) || 0;
       }
-      function isVisible(dist) {
-        return !clipEnabled() || dist <= clipLimit();
+      function visible(d) {
+        return !clipEnabled() || d <= clipLimit();
       }
 
-      /* === draw === */
+      /* === DRAW LOOP ============================================================ */
       function draw() {
-        ctx.clearRect(0, 0, cvs.width, cvs.height);
+        ctx.clearRect(0, 0, W, H);
 
-        // recompute furthest visible distance each frame
-        furthestCm = 1;
-        echoes.forEach((a) => {
-          if (a.length) {
-            const d = a[0].d;
-            if (isVisible(d)) furthestCm = Math.max(furthestCm, d);
-          }
-        });
+        // furthest visible echo
+        furthest = 1;
+        for (let a = 0; a <= 180; a++) {
+          const d = echoes[a][0];
+          if (d !== null && visible(d)) furthest = Math.max(furthest, d);
+        }
         computeScale();
 
         ctx.save();
         ctx.beginPath();
-        ctx.arc(ORIGIN_X, ORIGIN_Y, cvs.height, Math.PI, 2 * Math.PI);
+        ctx.arc(OX, OY, H, Math.PI, 2 * Math.PI);
         ctx.clip();
 
-        // rings
-        ctx.strokeStyle = RING_COLOR;
+        ctx.strokeStyle = RING_COL;
         ctx.lineWidth = 1;
-        for (let i = 1; i <= RING_COUNT; i++) {
-          const r = (cvs.height * i) / RING_COUNT;
-          ctx.beginPath();
-          ctx.arc(ORIGIN_X, ORIGIN_Y, r, Math.PI, 2 * Math.PI);
-          ctx.stroke();
-        }
+        ctx.stroke(RINGS_PATH);
 
-        // cone
         ctx.fillStyle = `rgba(${CONE_RGB},0.15)`;
-        const a1 = ((currentAngle - CONE_HALF_DEG) * Math.PI) / 180;
-        const a2 = ((currentAngle + CONE_HALF_DEG) * Math.PI) / 180;
         ctx.beginPath();
-        ctx.moveTo(ORIGIN_X, ORIGIN_Y);
-        ctx.lineTo(
-          ORIGIN_X + cvs.height * Math.cos(a1),
-          ORIGIN_Y - cvs.height * Math.sin(a1)
-        );
-        ctx.lineTo(
-          ORIGIN_X + cvs.height * Math.cos(a2),
-          ORIGIN_Y - cvs.height * Math.sin(a2)
-        );
+        ctx.moveTo(OX, OY);
+        const a1 = currAngle - CONE_HALF_DEG,
+          a2 = currAngle + CONE_HALF_DEG;
+        ctx.lineTo(OX + H * COS[a1], OY - H * SIN[a1]);
+        ctx.lineTo(OX + H * COS[a2], OY - H * SIN[a2]);
         ctx.closePath();
         ctx.fill();
 
-        // dots: newest strong, previous dimmer
-        const levels = [1, 0.5];
-        echoes.forEach((arr) => {
-          arr.forEach((e, idx) => {
-            if (idx >= levels.length) return;
-            if (!isVisible(e.d)) return;
-            ctx.fillStyle = `rgba(${DOT_RGB},${levels[idx]})`;
-            const r = e.d * PX_PER_CM;
-            const aRad = (e.angle * Math.PI) / 180;
+        for (let a = 0; a <= 180; a++) {
+          const list = echoes[a];
+          for (let i = 0; i < MAX_ECHO_PER_ANGLE; i++) {
+            const d = list[i];
+            if (d === null || !visible(d)) continue;
+            ctx.fillStyle = `rgba(${DOT_RGB},${LEVEL_ALPHA[i]})`;
+            const r = d * PX_PER_CM;
             ctx.beginPath();
-            ctx.arc(
-              ORIGIN_X + r * Math.cos(aRad),
-              ORIGIN_Y - r * Math.sin(aRad),
-              3,
-              0,
-              Math.PI * 2
-            );
+            ctx.arc(OX + r * COS[a], OY - r * SIN[a], 3, 0, Math.PI * 2);
             ctx.fill();
-          });
-        });
+          }
+        }
 
         ctx.restore();
         requestAnimationFrame(draw);
       }
       requestAnimationFrame(draw);
 
-      /* === websocket === */
-      function detectIP() {
+      /* === WEBSOCKET ============================================================ */
+      function getIP() {
         const h = location.hostname;
         return !h || h === "localhost" || h === "127.0.0.1"
           ? DEFAULT_ESP_IP
           : h;
       }
-      const ESP_IP =
-        new URLSearchParams(location.search).get("ip") || detectIP();
+      const ESP_IP = new URLSearchParams(location.search).get("ip") || getIP();
       let ws, retry;
       function connect() {
         ws = new WebSocket(`ws://${ESP_IP}:${WS_PORT}/`);
-        stTxt.textContent = "Connecting…";
-        ws.onopen = () => (stTxt.textContent = `🟢 Connected → ${ESP_IP}`);
-        ws.onerror = () => ws.close();
+        st.textContent = "Connecting…";
+        ws.onopen = () => (st.textContent = `🟢 Connected → ${ESP_IP}`);
         ws.onclose = () => {
-          stTxt.textContent = "🔴 Disconnected – retrying…";
+          st.textContent = "🔴 Disconnected – retrying…";
           if (!retry)
             retry = setTimeout(() => {
               retry = null;
               connect();
             }, RECONNECT_MS);
         };
+        ws.onerror = () => ws.close();
         ws.onmessage = ({ data }) => {
           try {
-            const { angle, distance } = JSON.parse(data);
-            if (typeof angle === "number" && typeof distance === "number")
-              storeEcho(Math.round(angle), Math.max(0, distance));
+            const { angle, distance: d } = JSON.parse(data);
+            if (typeof angle === "number" && typeof d === "number")
+              pushEcho(angle | 0, Math.max(0, d));
           } catch {}
         };
       }
       connect();
 
-      /* === echo buffer === */
-      function storeEcho(angle, dist) {
-        let arr = echoes.get(angle);
-        if (!arr) {
-          arr = [];
-          echoes.set(angle, arr);
-        }
-        arr.unshift({ angle, d: dist });
+      /* === STORE ECHO =========================================================== */
+      function pushEcho(angle, d) {
+        if (angle < 0 || angle > 180) return;
+        const arr = echoes[angle];
+        arr.unshift(d);
         if (arr.length > MAX_ECHO_PER_ANGLE) arr.length = MAX_ECHO_PER_ANGLE;
-        currentAngle = angle;
+        currAngle = angle;
         angTxt.textContent = `Angle ${angle}°`;
-        distTxt.textContent = `Distance ${dist.toFixed(1)} cm`;
+        distTxt.textContent = `Distance ${d.toFixed(1)} cm`;
       }
     </script>
   </body>
