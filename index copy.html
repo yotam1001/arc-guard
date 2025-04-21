@@ -1,135 +1,247 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Angle-Distance Chart</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <meta charset="utf-8" />
+    <title>ESP32 Ultrasonic Radar – Range‑Clip & Two‑Echo</title>
     <style>
+      :root {
+        --bg: #0a0a0a;
+        --ring: #222;
+        --dot-rgb: 0, 255, 128;
+        --cone-rgb: 0, 255, 0;
+      }
+      html,
       body {
-        font-family: Arial, sans-serif;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        height: 100vh;
         margin: 0;
-        background-color: #f8f9fa;
+        height: 100%;
+        background: var(--bg);
+        color: #eee;
+        font-family: system-ui, sans-serif;
+        overflow: hidden;
       }
-      #chartContainer {
-        width: 80%;
-        max-width: 800px;
+      #radar {
+        display: block;
+        background: transparent;
+        touch-action: none;
       }
-      canvas {
-        width: 100% !important;
-        height: 400px !important;
+      #overlay {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        font-size: 0.9rem;
+        line-height: 1.4;
+        pointer-events: auto;
+      }
+      #overlay span,
+      label {
+        display: block;
+      }
+      #clipLimit {
+        width: 60px;
+        margin-left: 4px;
       }
     </style>
   </head>
   <body>
-    <div id="chartContainer">
-      <canvas id="chartCanvas"></canvas>
+    <canvas id="radar"></canvas>
+    <div id="overlay">
+      <span id="status">Connecting…</span>
+      <span id="angle"></span>
+      <span id="distance"></span>
+      <label
+        ><input type="checkbox" id="clipToggle" checked /> Clip
+        distances &gt;</label
+      >
+      <input
+        type="number"
+        id="clipLimit"
+        value="300"
+        min="10"
+        max="1000"
+        step="10"
+      /> cm
     </div>
-
     <script>
-      // Sanity check to make sure JS is running
-      console.log("🧪 JS is running!");
+      /* === CONFIG ================================================================ */
+      const DEFAULT_ESP_IP = "192.168.1.45";
+      const WS_PORT = 8080;
+      const RING_COUNT = 4;
+      const CONE_HALF_DEG = 2;
+      const RECONNECT_MS = 2000;
+      const MAX_ECHO_PER_ANGLE = 2; // keep only current + previous
 
-      const socket = new WebSocket("ws://192.168.1.45:8080");
+      /* === DOM ================================================================ */
+      const cvs = document.getElementById("radar");
+      const ctx = cvs.getContext("2d");
+      const stTxt = document.getElementById("status");
+      const angTxt = document.getElementById("angle");
+      const distTxt = document.getElementById("distance");
+      const clipToggle = document.getElementById("clipToggle");
+      const clipLimitInput = document.getElementById("clipLimit");
 
-      // Timeout warning if WebSocket connection isn't established in time
-      setTimeout(() => {
-        if (socket.readyState !== WebSocket.OPEN) {
-          console.warn("⏳ Still waiting for WebSocket connection...");
-        }
-      }, 3000);
+      /* === cached colours === */
+      const DOT_RGB = getComputedStyle(
+        document.documentElement
+      ).getPropertyValue("--dot-rgb");
+      const CONE_RGB = getComputedStyle(
+        document.documentElement
+      ).getPropertyValue("--cone-rgb");
+      const RING_COLOR = getComputedStyle(
+        document.documentElement
+      ).getPropertyValue("--ring");
 
-      socket.onopen = () => {
-        console.log("✅ Connected to ESP32 WebSocket!");
-        socket.send("hello from browser");
-      };
+      /* === geometry === */
+      let ORIGIN_X,
+        ORIGIN_Y,
+        PX_PER_CM = 1;
+      function resizeCanvas() {
+        const W = innerWidth;
+        const H = Math.min(innerHeight, W / 2);
+        cvs.width = W;
+        cvs.height = H;
+        ORIGIN_X = W / 2;
+        ORIGIN_Y = H;
+      }
+      addEventListener("resize", resizeCanvas);
+      resizeCanvas();
 
-      socket.onmessage = (event) => {
-        console.log("📩 Raw message from ESP32:", event.data);
+      /* === data === */
+      const echoes = new Map();
+      let currentAngle = 0;
+      let furthestCm = 1;
 
-        try {
-          const data = JSON.parse(event.data);
-          console.log("✅ Parsed JSON:", data);
+      function computeScale() {
+        PX_PER_CM = cvs.height / furthestCm;
+      }
 
-          if (data.angle !== undefined && data.distance !== undefined) {
-            const angle = parseInt(data.angle);
-            const distance = parseFloat(data.distance);
+      /* === helpers === */
+      function clipEnabled() {
+        return clipToggle.checked;
+      }
+      function clipLimit() {
+        return Number(clipLimitInput.value) || 0;
+      }
+      function isVisible(dist) {
+        return !clipEnabled() || dist <= clipLimit();
+      }
 
-            console.log(
-              `📈 Updating graph → Angle: ${angle}, Distance: ${distance}`
-            );
-            console.log(
-              `🧪 Types → angle: ${typeof angle}, distance: ${typeof distance}`
-            );
+      /* === draw === */
+      function draw() {
+        ctx.clearRect(0, 0, cvs.width, cvs.height);
 
-            updateGraph(angle, distance);
-          } else {
-            console.warn("⚠️ JSON missing angle or distance:", data);
+        // recompute furthest visible distance each frame
+        furthestCm = 1;
+        echoes.forEach((a) => {
+          if (a.length) {
+            const d = a[0].d;
+            if (isVisible(d)) furthestCm = Math.max(furthestCm, d);
           }
-        } catch (error) {
-          console.error("🚨 JSON Parse Error:", error);
-        }
-      };
+        });
+        computeScale();
 
-      socket.onerror = (error) => {
-        console.error("🚨 WebSocket Error:", error);
-      };
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(ORIGIN_X, ORIGIN_Y, cvs.height, Math.PI, 2 * Math.PI);
+        ctx.clip();
 
-      socket.onclose = () => {
-        console.warn("🔴 WebSocket Disconnected");
-      };
-
-      // Chart.js setup
-      const ctx = document.getElementById("chartCanvas").getContext("2d");
-      const chartData = {
-        labels: [],
-        datasets: [
-          {
-            label: "Distance (cm)",
-            borderColor: "#17a2b8",
-            backgroundColor: "rgba(23, 162, 184, 0.2)",
-            data: [],
-            fill: true,
-          },
-        ],
-      };
-
-      const chartOptions = {
-        scales: {
-          x: { title: { display: true, text: "Angle (degrees)" } },
-          y: {
-            title: { display: true, text: "Distance (cm)" },
-            min: 0,
-            max: 200,
-          },
-        },
-      };
-
-      const chart = new Chart(ctx, {
-        type: "line",
-        data: chartData,
-        options: chartOptions,
-      });
-
-      function updateGraph(angle, distance) {
-        console.log("🧩 Current Labels:", chartData.labels);
-
-        const index = chartData.labels.indexOf(angle);
-
-        if (index === -1) {
-          console.log(`➕ Adding new angle: ${angle}`);
-          chartData.labels.push(angle);
-          chartData.datasets[0].data.push(distance);
-        } else {
-          console.log(`🔁 Updating existing angle at index ${index}`);
-          chartData.datasets[0].data[index] = distance;
+        // rings
+        ctx.strokeStyle = RING_COLOR;
+        ctx.lineWidth = 1;
+        for (let i = 1; i <= RING_COUNT; i++) {
+          const r = (cvs.height * i) / RING_COUNT;
+          ctx.beginPath();
+          ctx.arc(ORIGIN_X, ORIGIN_Y, r, Math.PI, 2 * Math.PI);
+          ctx.stroke();
         }
 
-        chart.update();
+        // cone
+        ctx.fillStyle = `rgba(${CONE_RGB},0.15)`;
+        const a1 = ((currentAngle - CONE_HALF_DEG) * Math.PI) / 180;
+        const a2 = ((currentAngle + CONE_HALF_DEG) * Math.PI) / 180;
+        ctx.beginPath();
+        ctx.moveTo(ORIGIN_X, ORIGIN_Y);
+        ctx.lineTo(
+          ORIGIN_X + cvs.height * Math.cos(a1),
+          ORIGIN_Y - cvs.height * Math.sin(a1)
+        );
+        ctx.lineTo(
+          ORIGIN_X + cvs.height * Math.cos(a2),
+          ORIGIN_Y - cvs.height * Math.sin(a2)
+        );
+        ctx.closePath();
+        ctx.fill();
+
+        // dots: newest strong, previous dimmer
+        const levels = [1, 0.5];
+        echoes.forEach((arr) => {
+          arr.forEach((e, idx) => {
+            if (idx >= levels.length) return;
+            if (!isVisible(e.d)) return;
+            ctx.fillStyle = `rgba(${DOT_RGB},${levels[idx]})`;
+            const r = e.d * PX_PER_CM;
+            const aRad = (e.angle * Math.PI) / 180;
+            ctx.beginPath();
+            ctx.arc(
+              ORIGIN_X + r * Math.cos(aRad),
+              ORIGIN_Y - r * Math.sin(aRad),
+              3,
+              0,
+              Math.PI * 2
+            );
+            ctx.fill();
+          });
+        });
+
+        ctx.restore();
+        requestAnimationFrame(draw);
+      }
+      requestAnimationFrame(draw);
+
+      /* === websocket === */
+      function detectIP() {
+        const h = location.hostname;
+        return !h || h === "localhost" || h === "127.0.0.1"
+          ? DEFAULT_ESP_IP
+          : h;
+      }
+      const ESP_IP =
+        new URLSearchParams(location.search).get("ip") || detectIP();
+      let ws, retry;
+      function connect() {
+        ws = new WebSocket(`ws://${ESP_IP}:${WS_PORT}/`);
+        stTxt.textContent = "Connecting…";
+        ws.onopen = () => (stTxt.textContent = `🟢 Connected → ${ESP_IP}`);
+        ws.onerror = () => ws.close();
+        ws.onclose = () => {
+          stTxt.textContent = "🔴 Disconnected – retrying…";
+          if (!retry)
+            retry = setTimeout(() => {
+              retry = null;
+              connect();
+            }, RECONNECT_MS);
+        };
+        ws.onmessage = ({ data }) => {
+          try {
+            const { angle, distance } = JSON.parse(data);
+            if (typeof angle === "number" && typeof distance === "number")
+              storeEcho(Math.round(angle), Math.max(0, distance));
+          } catch {}
+        };
+      }
+      connect();
+
+      /* === echo buffer === */
+      function storeEcho(angle, dist) {
+        let arr = echoes.get(angle);
+        if (!arr) {
+          arr = [];
+          echoes.set(angle, arr);
+        }
+        arr.unshift({ angle, d: dist });
+        if (arr.length > MAX_ECHO_PER_ANGLE) arr.length = MAX_ECHO_PER_ANGLE;
+        currentAngle = angle;
+        angTxt.textContent = `Angle ${angle}°`;
+        distTxt.textContent = `Distance ${dist.toFixed(1)} cm`;
       }
     </script>
   </body>
