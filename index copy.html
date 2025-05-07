@@ -34,6 +34,7 @@
         border-radius: 8px;
         backdrop-filter: blur(4px);
         box-shadow: 0 0 10px rgba(0, 255, 0, 0.1);
+        z-index: 10;
       }
       #clipLimit {
         width: 60px;
@@ -44,14 +45,59 @@
         padding: 2px 4px;
         border-radius: 4px;
       }
+
+      #tutorialBtn {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        padding: 8px 12px;
+        background: #111;
+        color: #0f0;
+        border: 1px solid #0f0;
+        border-radius: 8px;
+        cursor: pointer;
+        z-index: 10;
+      }
+
+      #tutorialPopup {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: #111;
+        color: #eee;
+        border: 2px solid #0f0;
+        border-radius: 12px;
+        padding: 16px 20px;
+        width: 90%;
+        max-width: 500px;
+        display: none;
+        z-index: 100;
+        box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
+      }
+
+      #tutorialPopup h2 {
+        margin-top: 0;
+        color: #0f0;
+      }
+
+      #closeTutorial {
+        margin-top: 16px;
+        background: #0f0;
+        color: #000;
+        border: none;
+        padding: 6px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>
     <canvas id="radar"></canvas>
+
     <div id="overlay">
       <div id="status">Connecting…</div>
       <div><span id="angle"></span> <span id="distance"></span></div>
-      <div><span id="irStatus">IR Status: Waiting…</span></div>
       <label>
         <input type="checkbox" id="clipToggle" checked /> Clip distances >
       </label>
@@ -65,6 +111,27 @@
       />
       cm
     </div>
+
+    <button id="tutorialBtn">📘 Tutorial</button>
+
+    <div id="tutorialPopup">
+      <h2>How the Radar System Works</h2>
+      <p>
+        This ESP32-powered radar scans 180° using an ultrasonic sensor and
+        tracks distance data to detect nearby objects.
+      </p>
+      <ul>
+        <li>Green dots = static objects</li>
+        <li>Red dots = movement detected</li>
+        <li>Alarm triggers on significant motion</li>
+        <li>
+          You can adjust the detection range (clip distances) with the input
+          field
+        </li>
+      </ul>
+      <button id="closeTutorial">Close</button>
+    </div>
+
     <audio
       id="alarmSound"
       src="https://www.soundjay.com/button/sounds/beep-07.mp3"
@@ -97,7 +164,17 @@
       const clipTgl = document.getElementById("clipToggle");
       const clipInp = document.getElementById("clipLimit");
       const alarmSound = document.getElementById("alarmSound");
-      const irStatus = document.getElementById("irStatus");
+
+      const tutorialBtn = document.getElementById("tutorialBtn");
+      const tutorialPopup = document.getElementById("tutorialPopup");
+      const closeTutorial = document.getElementById("closeTutorial");
+
+      tutorialBtn.onclick = () => {
+        tutorialPopup.style.display = "block";
+      };
+      closeTutorial.onclick = () => {
+        tutorialPopup.style.display = "none";
+      };
 
       let W,
         H,
@@ -285,13 +362,6 @@
             const parsed = JSON.parse(data);
             if ("angle" in parsed && "distance" in parsed) {
               pushEcho(parsed.angle | 0, Math.max(0, parsed.distance));
-            }
-            if ("irLeft" in parsed || "irRight" in parsed) {
-              const status = [];
-              if (parsed.irLeft) status.push("Left IR Triggered");
-              if (parsed.irRight) status.push("Right IR Triggered");
-              irStatus.textContent =
-                "IR Status: " + (status.length ? status.join(" & ") : "Clear");
             }
           } catch {}
         };
