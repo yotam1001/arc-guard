@@ -25,24 +25,33 @@
       }
       #overlay {
         position: fixed;
-        top: 8px;
-        left: 8px;
-        font-size: 0.9rem;
-        line-height: 1.4;
-        pointer-events: auto;
+        top: 12px;
+        left: 12px;
+        font-size: 0.95rem;
+        line-height: 1.5;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 8px 12px;
+        border-radius: 8px;
+        backdrop-filter: blur(4px);
+        box-shadow: 0 0 10px rgba(0, 255, 0, 0.1);
       }
       #clipLimit {
         width: 60px;
         margin-left: 4px;
+        background: #111;
+        color: #0f0;
+        border: 1px solid #333;
+        padding: 2px 4px;
+        border-radius: 4px;
       }
     </style>
   </head>
   <body>
     <canvas id="radar"></canvas>
     <div id="overlay">
-      <span id="status">Connecting…</span>
-      <span id="angle"></span>
-      <span id="distance"></span>
+      <div id="status">Connecting…</div>
+      <div><span id="angle"></span> <span id="distance"></span></div>
+      <div><span id="irStatus">IR Status: Waiting…</span></div>
       <label>
         <input type="checkbox" id="clipToggle" checked /> Clip distances >
       </label>
@@ -62,14 +71,12 @@
     ></audio>
 
     <script>
-      /* === CONSTANTS & SETTINGS === */
       const DEFAULT_ESP_IP = "192.168.22.120";
       const WS_PORT = 8080;
       const MAX_ECHO_PER_ANGLE = 2;
       const MOVEMENT_THRESHOLD_CM = 30;
-      const REQUIRED_MOVING_POINTS = 6;
+      const REQUIRED_MOVING_POINTS = 5;
       const ALARM_DURATION_MS = 3000;
-      const DISTANCE_THRESHOLD = 50; // cm difference considered "drastic"
 
       const DOT_RGB = getComputedStyle(
         document.documentElement
@@ -81,9 +88,7 @@
         document.documentElement
       ).getPropertyValue("--ring");
       const LEVEL_ALPHA = [1, 0.55];
-      const sweepOpacity = 0.7;
 
-      /* === DOM ELEMENTS === */
       const cvs = document.getElementById("radar");
       const ctx = cvs.getContext("2d");
       const st = document.getElementById("status");
@@ -92,8 +97,8 @@
       const clipTgl = document.getElementById("clipToggle");
       const clipInp = document.getElementById("clipLimit");
       const alarmSound = document.getElementById("alarmSound");
+      const irStatus = document.getElementById("irStatus");
 
-      /* === CANVAS GEOMETRY === */
       let W,
         H,
         OX,
@@ -127,10 +132,10 @@
           RINGS_PATH.arc(OX, OY, r, Math.PI, 2 * Math.PI);
         }
       }
+
       addEventListener("resize", resize);
       resize();
 
-      /* === DATA & FLAGS === */
       const echoes = Array.from({ length: 181 }, () => [null, null]);
       const previousEchoes = Array.from({ length: 181 }, () => [null, null]);
       const movedFlags = new Array(181).fill(false);
@@ -138,13 +143,11 @@
       let currAngle = 0;
       let lastAngle = 0;
       let fullRotations = 0;
-
       let capturingBaseline = true;
       let baselineCaptured = false;
       let alarmActive = false;
       let alarmTriggered = false;
 
-      /* === HELPER FUNCTIONS === */
       function clipEnabled() {
         return clipTgl.checked;
       }
@@ -155,20 +158,17 @@
         return !clipEnabled() || d <= clipLimit();
       }
 
-      /* === ALARM SYSTEM === */
       function triggerAlarm() {
         if (alarmActive) return;
-
         alarmActive = true;
         alarmTriggered = true;
         alarmSound.play();
         st.textContent = "🚨 Movement detected! Alarm triggered.";
-
         setTimeout(() => {
           alarmSound.pause();
           alarmSound.currentTime = 0;
           alarmActive = false;
-          capturingBaseline = true; // reset baseline after alarm
+          capturingBaseline = true;
           baselineCaptured = false;
           st.textContent = "Baseline reset after alarm.";
         }, ALARM_DURATION_MS);
@@ -176,13 +176,11 @@
 
       function checkMovement() {
         if (!baselineCaptured || alarmTriggered) return;
-
         let movedPoints = 0;
         for (let i = 0; i <= 180; i++) {
           movedFlags[i] = false;
           const [old0, old1] = previousEchoes[i];
           const [new0, new1] = echoes[i];
-
           if (
             old0 !== null &&
             new0 !== null &&
@@ -199,34 +197,25 @@
             movedPoints++;
           }
         }
-
-        console.log(`Moved points: ${movedPoints}`);
-        if (movedPoints >= REQUIRED_MOVING_POINTS) {
-          triggerAlarm();
-        }
+        if (movedPoints >= REQUIRED_MOVING_POINTS) triggerAlarm();
       }
 
-      /* === UPDATED DRAW FUNCTION === */
       function draw() {
         ctx.clearRect(0, 0, W, H);
-
         furthest = 1;
         for (let a = 0; a <= 180; a++) {
           const d = echoes[a][0];
           if (d !== null && visible(d)) furthest = Math.max(furthest, d);
         }
         PX_PER_CM = H / furthest;
-
         ctx.save();
         ctx.beginPath();
         ctx.arc(OX, OY, H, Math.PI, 2 * Math.PI);
         ctx.clip();
 
-        // Draw rings
         ctx.strokeStyle = RING_COL;
         ctx.stroke(RINGS_PATH);
 
-        // Draw echoes
         for (let a = 0; a <= 180; a++) {
           const data = echoes[a];
           for (let i = 0; i < MAX_ECHO_PER_ANGLE; i++) {
@@ -242,30 +231,37 @@
           }
         }
 
-        // === Draw the sweeping radar line ===
-        ctx.strokeStyle = `rgba(${MOVE_RGB},${sweepOpacity})`;
-        ctx.lineWidth = 2;
+        const coneWidth = 10;
+        const startAngle = Math.max(0, currAngle - coneWidth / 2);
+        const endAngle = Math.min(180, currAngle + coneWidth / 2);
+        const gradient = ctx.createRadialGradient(OX, OY, 0, OX, OY, H);
+        gradient.addColorStop(0, `rgba(${DOT_RGB}, 0.2)`);
+        gradient.addColorStop(1, `rgba(${DOT_RGB}, 0.05)`);
+
+        ctx.fillStyle = gradient;
         ctx.beginPath();
         ctx.moveTo(OX, OY);
-        ctx.lineTo(OX + H * COS[currAngle], OY - H * SIN[currAngle]);
-        ctx.stroke();
+        for (let a = startAngle; a <= endAngle; a += 1) {
+          const x = OX + H * COS[a];
+          const y = OY - H * SIN[a];
+          ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill();
 
-        // === Drastic alarm visual ===
         if (alarmActive) {
-          ctx.fillStyle = "rgba(255, 0, 0, 0.3)"; // semi-transparent red flash
+          ctx.fillStyle = "rgba(255, 0, 0, 0.3)";
           ctx.fillRect(0, 0, W, H);
           ctx.fillStyle = "white";
           ctx.font = "bold 48px system-ui, sans-serif";
           ctx.textAlign = "center";
           ctx.fillText("🚨 ALARM!", W / 2, H / 2);
         }
-
         ctx.restore();
         requestAnimationFrame(draw);
       }
       requestAnimationFrame(draw);
 
-      /* === WEBSOCKET === */
       function getIP() {
         const h = location.hostname;
         return !h || h === "localhost" || h === "127.0.0.1"
@@ -286,17 +282,24 @@
         };
         ws.onmessage = ({ data }) => {
           try {
-            const { angle, distance } = JSON.parse(data);
-            pushEcho(angle | 0, Math.max(0, distance));
+            const parsed = JSON.parse(data);
+            if ("angle" in parsed && "distance" in parsed) {
+              pushEcho(parsed.angle | 0, Math.max(0, parsed.distance));
+            }
+            if ("irLeft" in parsed || "irRight" in parsed) {
+              const status = [];
+              if (parsed.irLeft) status.push("Left IR Triggered");
+              if (parsed.irRight) status.push("Right IR Triggered");
+              irStatus.textContent =
+                "IR Status: " + (status.length ? status.join(" & ") : "Clear");
+            }
           } catch {}
         };
       }
       connect();
 
-      /* === STORE ECHO === */
       function pushEcho(angle, distance) {
         if (angle < 0 || angle > 180) return;
-
         const arr = echoes[angle];
         arr.unshift(distance);
         if (arr.length > MAX_ECHO_PER_ANGLE) arr.length = MAX_ECHO_PER_ANGLE;
@@ -305,26 +308,21 @@
         angTxt.textContent = `Angle ${angle}°`;
         distTxt.textContent = `Distance ${distance.toFixed(1)} cm`;
 
-        // Detect full rotation (angle wrap-around)
         if (lastAngle > angle) {
           fullRotations++;
           alarmTriggered = false;
-
           if (!baselineCaptured && !capturingBaseline) capturingBaseline = true;
         }
         lastAngle = angle;
 
-        if (capturingBaseline) {
-          // Capture baseline after full rotation
-          if (angle === 180) {
-            for (let i = 0; i <= 180; i++) {
-              previousEchoes[i][0] = echoes[i][0];
-              previousEchoes[i][1] = echoes[i][1];
-            }
-            baselineCaptured = true;
-            capturingBaseline = false;
-            st.textContent = "✅ Baseline captured.";
+        if (capturingBaseline && angle === 180) {
+          for (let i = 0; i <= 180; i++) {
+            previousEchoes[i][0] = echoes[i][0];
+            previousEchoes[i][1] = echoes[i][1];
           }
+          baselineCaptured = true;
+          capturingBaseline = false;
+          st.textContent = "✅ Baseline captured.";
         } else {
           checkMovement();
         }
